@@ -28,6 +28,67 @@ const createTransporter = () => nodemailer.createTransport({
   socketTimeout:    10000,   // inactivity once connected
 });
 
+// ── How mail actually leaves this server ─────────────────────────────────────
+// Two routes, chosen automatically:
+//
+//   BREVO_API_KEY set  → Brevo's HTTPS API. Used in deployment, because hosts
+//                        like Render's free tier BLOCK outbound SMTP ports.
+//                        Port 443 is never blocked, so this works where SMTP
+//                        cannot.
+//   otherwise          → Gmail SMTP, exactly as before. Local development
+//                        needs no changes and no Brevo account.
+//
+// Every template below is unchanged; only the delivery step differs.
+const FROM_NAME = "Z's Cleaning Services";
+
+// The address recipients see. Brevo requires this to be a sender you have
+// verified in their dashboard; with SMTP it is the Gmail account itself.
+const fromAddress = () =>
+  (process.env.MAIL_FROM || process.env.SMTP_USER || '').trim();
+
+// True when EITHER route is usable. Replaces the old SMTP-only check, so a
+// Brevo-only deployment is correctly treated as configured.
+const mailConfigured = () =>
+  !!(process.env.BREVO_API_KEY || '').trim() ||
+  !!((process.env.SMTP_USER || '').trim() && (process.env.SMTP_PASS || '').trim());
+
+async function deliver({ to, subject, html }) {
+  const key = (process.env.BREVO_API_KEY || '').trim();
+
+  if (key) {
+    if (typeof fetch !== 'function')
+      throw new Error('Node 18 or newer is required to send through Brevo.');
+
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key':      key,
+        'content-type': 'application/json',
+        'accept':       'application/json',
+      },
+      body: JSON.stringify({
+        sender:      { name: FROM_NAME, email: fromAddress() },
+        to:          [{ email: to }],
+        subject,
+        htmlContent: html,
+      }),
+      // Never let a hung request hold up whatever is awaiting this.
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!res.ok) {
+      // Brevo explains refusals in the body — an unverified sender address is
+      // the usual one. Surfacing it saves a long hunt.
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Brevo responded ${res.status}: ${detail.slice(0, 300)}`);
+    }
+    return;
+  }
+
+  const t = createTransporter();
+  await t.sendMail({ from: `"${FROM_NAME}" <${fromAddress()}>`, to, subject, html });
+}
+
 // ── OTP Email ─────────────────────────────────────────────────────────────────
 exports.sendOtpEmail = async ({ to, name, otp }) => {
   // Always print OTP to server console regardless of SMTP config
@@ -36,17 +97,14 @@ exports.sendOtpEmail = async ({ to, name, otp }) => {
   console.log('========================================\n');
 
   // If SMTP not configured at all — return special error so controller handles it
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS ||
-      process.env.SMTP_USER.trim() === '' || process.env.SMTP_PASS.trim() === '') {
+  if (!mailConfigured()) {
     const err = new Error('SMTP_NOT_CONFIGURED');
     err.devOtp = otp;
     throw err;
   }
 
   // Send actual email — let errors bubble up to controller
-  const t = createTransporter();
-  await t.sendMail({
-    from:    `"Z's Cleaning Services" <${process.env.SMTP_USER}>`,
+  await deliver({
     to,
     subject: `Your Password Reset Code — Z's Cleaning Services`,
     html: `
@@ -70,15 +128,12 @@ exports.sendOtpEmail = async ({ to, name, otp }) => {
 
 // ── Booking Confirmation ──────────────────────────────────────────────────────
 exports.sendBookingConfirmation = async ({ to, name, bookingId, serviceName, date, timeStart, location, paymentMethod }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS ||
-      process.env.SMTP_USER.trim() === '' || process.env.SMTP_PASS.trim() === '') {
+  if (!mailConfigured()) {
     console.log(`📧 [No SMTP] Confirmation skipped for booking #${bookingId} → ${to}`);
     return;
   }
   try {
-    const t = createTransporter();
-    await t.sendMail({
-      from:    `"Z's Cleaning Services" <${process.env.SMTP_USER}>`,
+    await deliver({
       to,
       subject: `Booking Received — Pending Confirmation | Z's Cleaning Services`,
       html: `
@@ -95,7 +150,7 @@ exports.sendBookingConfirmation = async ({ to, name, bookingId, serviceName, dat
               <tr><td style="padding:5px 0;color:#6b7280;">Location</td><td style="font-weight:700;">${location}</td></tr>
               <tr><td style="padding:5px 0;color:#6b7280;">Payment</td><td style="font-weight:700;text-transform:capitalize;">${paymentMethod}</td></tr>
             </table>
-            <p style="color:#9ca3af;font-size:12px;margin-top:20px;">Questions? Call 0916-213-3460.</p><p style="color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.5;">Not seeing our emails? Check your <strong>Spam</strong> or <strong>Promotions</strong> folder and mark this message as <strong>&ldquo;Not spam&rdquo;</strong>, or add <strong>${process.env.SMTP_USER || "our email"}</strong> to your contacts so booking updates and reminders reach your inbox.</p>
+            <p style="color:#9ca3af;font-size:12px;margin-top:20px;">Questions? Call 0916-213-3460.</p><p style="color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.5;">Not seeing our emails? Check your <strong>Spam</strong> or <strong>Promotions</strong> folder and mark this message as <strong>&ldquo;Not spam&rdquo;</strong>, or add <strong>${fromAddress() || "our email"}</strong> to your contacts so booking updates and reminders reach your inbox.</p>
           </div>
         </div>`,
     });
@@ -107,15 +162,12 @@ exports.sendBookingConfirmation = async ({ to, name, bookingId, serviceName, dat
 
 // ── Admin Confirmed Booking Email ─────────────────────────────────────────────
 exports.sendBookingConfirmedEmail = async ({ to, name, bookingId, serviceName, date, timeStart, location, paymentMethod, total }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS ||
-      process.env.SMTP_USER.trim() === '' || process.env.SMTP_PASS.trim() === '') {
+  if (!mailConfigured()) {
     console.log(`📧 [No SMTP] Confirmed email skipped for booking #${bookingId} → ${to}`);
     return;
   }
   try {
-    const t = createTransporter();
-    await t.sendMail({
-      from:    `"Z's Cleaning Services" <${process.env.SMTP_USER}>`,
+    await deliver({
       to,
       subject: `Booking Confirmed! #${bookingId} — Z's Cleaning Services`,
       html: `
@@ -138,7 +190,7 @@ exports.sendBookingConfirmedEmail = async ({ to, name, bookingId, serviceName, d
             <div style="background:#fef9c3;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
               <p style="color:#92400e;font-size:13px;margin:0;"><strong>📌 Reminder:</strong> Service starts at <strong>9:00 AM</strong>. Please ensure someone is home and the area is accessible for our cleaners.</p>
             </div>
-            <p style="color:#9ca3af;font-size:12px;margin:0;">Questions? Call us at <strong>0916-213-3460</strong>.</p><p style="color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.5;">Not seeing our emails? Check your <strong>Spam</strong> or <strong>Promotions</strong> folder and mark this message as <strong>&ldquo;Not spam&rdquo;</strong>, or add <strong>${process.env.SMTP_USER || "our email"}</strong> to your contacts so booking updates and reminders reach your inbox.</p>
+            <p style="color:#9ca3af;font-size:12px;margin:0;">Questions? Call us at <strong>0916-213-3460</strong>.</p><p style="color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.5;">Not seeing our emails? Check your <strong>Spam</strong> or <strong>Promotions</strong> folder and mark this message as <strong>&ldquo;Not spam&rdquo;</strong>, or add <strong>${fromAddress() || "our email"}</strong> to your contacts so booking updates and reminders reach your inbox.</p>
           </div>
           <!-- Printable Receipt -->
           <div style="background:#fff;padding:20px 24px;border:1px solid #e5e7eb;border-top:2px dashed #d1d5db;border-radius:0 0 12px 12px;">
@@ -161,12 +213,9 @@ exports.sendBookingConfirmedEmail = async ({ to, name, bookingId, serviceName, d
 
 // ── Reminder Email ────────────────────────────────────────────────────────────
 exports.sendReminderEmail = async ({ to, name, serviceName, date, timeStart, location }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS ||
-      process.env.SMTP_USER.trim() === '' || process.env.SMTP_PASS.trim() === '') return;
+  if (!mailConfigured()) return;
   try {
-    const t = createTransporter();
-    await t.sendMail({
-      from:    `"Z's Cleaning Services" <${process.env.SMTP_USER}>`,
+    await deliver({
       to,
       subject: `Reminder: Your cleaning service is tomorrow!`,
       html: `
@@ -178,7 +227,7 @@ exports.sendReminderEmail = async ({ to, name, serviceName, date, timeStart, loc
               Reminder: your <strong>${serviceName}</strong> is scheduled for 
               <strong>tomorrow, ${date}</strong> at <strong>${timeStart}</strong> at ${location}.
             </p>
-            <p style="color:#9ca3af;font-size:12px;margin-top:16px;">Questions? Call 0916-213-3460.</p><p style="color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.5;">Not seeing our emails? Check your <strong>Spam</strong> or <strong>Promotions</strong> folder and mark this message as <strong>&ldquo;Not spam&rdquo;</strong>, or add <strong>${process.env.SMTP_USER || "our email"}</strong> to your contacts so booking updates and reminders reach your inbox.</p>
+            <p style="color:#9ca3af;font-size:12px;margin-top:16px;">Questions? Call 0916-213-3460.</p><p style="color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.5;">Not seeing our emails? Check your <strong>Spam</strong> or <strong>Promotions</strong> folder and mark this message as <strong>&ldquo;Not spam&rdquo;</strong>, or add <strong>${fromAddress() || "our email"}</strong> to your contacts so booking updates and reminders reach your inbox.</p>
           </div>
         </div>`,
     });
@@ -190,12 +239,9 @@ exports.sendReminderEmail = async ({ to, name, serviceName, date, timeStart, loc
 // 2-hour "starting soon" reminder — same guard, transporter, and visual
 // template as sendReminderEmail above; only the subject and copy differ.
 exports.sendStartingSoonEmail = async ({ to, name, serviceName, date, timeStart, location }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS ||
-      process.env.SMTP_USER.trim() === '' || process.env.SMTP_PASS.trim() === '') return;
+  if (!mailConfigured()) return;
   try {
-    const t = createTransporter();
-    await t.sendMail({
-      from:    `"Z's Cleaning Services" <${process.env.SMTP_USER}>`,
+    await deliver({
       to,
       subject: `Your cleaning service starts in about 2 hours!`,
       html: `
@@ -208,7 +254,7 @@ exports.sendStartingSoonEmail = async ({ to, name, serviceName, date, timeStart,
               <strong>2 hours</strong> (today, ${date} at <strong>${timeStart}</strong>) at ${location}.
               Our team is on the way soon!
             </p>
-            <p style="color:#9ca3af;font-size:12px;margin-top:16px;">Questions? Call 0916-213-3460.</p><p style="color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.5;">Not seeing our emails? Check your <strong>Spam</strong> or <strong>Promotions</strong> folder and mark this message as <strong>&ldquo;Not spam&rdquo;</strong>, or add <strong>${process.env.SMTP_USER || "our email"}</strong> to your contacts so booking updates and reminders reach your inbox.</p>
+            <p style="color:#9ca3af;font-size:12px;margin-top:16px;">Questions? Call 0916-213-3460.</p><p style="color:#9ca3af;font-size:11px;margin-top:14px;line-height:1.5;">Not seeing our emails? Check your <strong>Spam</strong> or <strong>Promotions</strong> folder and mark this message as <strong>&ldquo;Not spam&rdquo;</strong>, or add <strong>${fromAddress() || "our email"}</strong> to your contacts so booking updates and reminders reach your inbox.</p>
           </div>
         </div>`,
     });
@@ -220,12 +266,9 @@ exports.sendStartingSoonEmail = async ({ to, name, serviceName, date, timeStart,
 // Security notice sent to the PREVIOUS address when a user changes their
 // email, so the real owner can react if the change wasn't theirs.
 exports.sendEmailChangedNotice = async ({ to, name, newEmail }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS ||
-      process.env.SMTP_USER.trim() === '' || process.env.SMTP_PASS.trim() === '') return;
+  if (!mailConfigured()) return;
   try {
-    const t = createTransporter();
-    await t.sendMail({
-      from:    `"Z's Cleaning Services" <${process.env.SMTP_USER}>`,
+    await deliver({
       to,
       subject: 'Your ZClean email address was changed',
       html: `
