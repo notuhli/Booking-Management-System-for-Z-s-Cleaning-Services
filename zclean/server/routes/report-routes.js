@@ -1,0 +1,13 @@
+const express = require('express');
+const r = express.Router();
+const { getDashboard, getMonthlyReport, getYearlyReport, getRangeReport, getProfitLoss, getScheduleLogs, getServiceStats, getPublicStats } = require('../controllers/report-controller');
+const { authenticate, requireRole } = require('../middleware/auth-middleware');
+r.get('/public-stats',   getPublicStats);
+r.get('/dashboard',      authenticate, requireRole('admin'), getDashboard);
+r.get('/monthly',        authenticate, requireRole('admin'), getMonthlyReport);
+r.get('/profit-loss', authenticate, requireRole('admin'), getProfitLoss);
+r.get('/range',   authenticate, requireRole('admin'), getRangeReport);
+r.get('/yearly',         authenticate, requireRole('admin'), getYearlyReport);
+r.get('/schedule-logs',  authenticate, requireRole('admin'), getScheduleLogs);
+r.get('/service-stats',  authenticate, requireRole('admin'), getServiceStats);
+module.exports = r;

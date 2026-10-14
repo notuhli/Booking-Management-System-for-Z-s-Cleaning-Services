@@ -1,0 +1,11 @@
+const express = require('express');
+const r = express.Router();
+const c = require('../controllers/global-addon-controller');
+const { authenticate, requireRole } = require('../middleware/auth-middleware');
+r.get( '/',     c.listAddons);
+r.get( '/all',  authenticate, requireRole('admin'), c.listAll);
+r.post('/',     authenticate, requireRole('admin'), c.createAddon);
+r.put( '/:id',  authenticate, requireRole('admin'), c.updateAddon);
+r.delete('/:id',authenticate, requireRole('admin'), c.deleteAddon);
+r.delete('/:id/permanent', authenticate, requireRole('admin'), c.permanentlyDeleteAddon);
+module.exports = r;

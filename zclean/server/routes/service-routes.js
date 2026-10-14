@@ -1,0 +1,13 @@
+const express = require('express');
+const r = express.Router();
+const c = require('../controllers/service-controller');
+const { authenticate, requireRole } = require('../middleware/auth-middleware');
+const { uploadServiceImage, verifyImage, uploadError } = require('../utils/upload');
+r.get( '/',     c.listServices);
+r.get( '/all',  authenticate, requireRole('admin'), c.getAllServices);
+r.post('/',     authenticate, requireRole('admin'), uploadServiceImage.single('image'), uploadError, verifyImage, c.createService);
+r.put( '/:id',  authenticate, requireRole('admin'), uploadServiceImage.single('image'), uploadError, verifyImage, c.updateService);
+r.delete('/:id',authenticate, requireRole('admin'), c.deleteService);
+r.patch('/:id/reactivate',  authenticate, requireRole('admin'), c.reactivateService);
+r.delete('/:id/permanent',  authenticate, requireRole('admin'), c.permanentlyDeleteService);
+module.exports = r;

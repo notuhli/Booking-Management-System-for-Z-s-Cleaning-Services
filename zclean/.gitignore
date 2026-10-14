@@ -1,0 +1,52 @@
+# ════════════════════════════════════════════════════════════════════════════
+# ZClean — files git must never carry
+#
+# WHY THIS MATTERS MOST
+#   The .env files hold the Supabase database password, the JWT signing secret
+#   and the Gmail app password. Push them once and they are public — and a
+#   repository's HISTORY keeps them even after a later commit deletes the file.
+#   Anyone with the JWT secret can mint an admin token without a password.
+#
+#   Capstone submission often means putting the code on GitHub, so this file
+#   has to exist BEFORE the first push.
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── Secrets ─────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*/.env
+*/.env.*
+!*/.env.example
+
+# ── Dependencies (reinstalled with `npm install`) ───────────────────────────
+node_modules/
+*/node_modules/
+
+# ── Build output ────────────────────────────────────────────────────────────
+dist/
+build/
+client/dist/
+
+# ── Uploads: real client data, not source code ──────────────────────────────
+# Payment receipts, chat photos and service images belong on the server, not
+# in version control. The folders themselves are recreated on startup.
+server/uploads/
+uploads/
+
+# ── Logs and local noise ────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+logs/
+
+# ── Editors and operating systems ───────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Temporary ───────────────────────────────────────────────────────────────
+*.tmp
+*.bak
+.cache/
