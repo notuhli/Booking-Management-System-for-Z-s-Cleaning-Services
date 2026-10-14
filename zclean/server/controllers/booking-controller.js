@@ -75,8 +75,12 @@ exports.createBooking = async (req, res) => {
     const method = payment_method || 'cash';
     // Both money figures are looked up on the server, never taken from the
     // request, so the stored total always matches the admin's own settings.
-    const fee       = await resolveTransportFee(location);
-    const surcharge = await resolveAreaSurcharge(sqm_range, service.price);
+    // These two read different settings and do not depend on each other, so
+    // they go to the database together rather than one after the other.
+    const [fee, surcharge] = await Promise.all([
+      resolveTransportFee(location),
+      resolveAreaSurcharge(sqm_range, service.price),
+    ]);
 
     // ── Availability + insert, as ONE atomic step ───────────────────────────
     // The checks and the insert used to be separate statements. Two people
@@ -173,20 +177,48 @@ exports.createBooking = async (req, res) => {
       throw txErr;
     }
 
-    // Notification
-    await createNotification(client_id, bookingId, `Your booking #${bookingId} has been submitted and is pending confirmation.`, 'booking');
-
-    // Email confirmation (non-blocking)
-    try {
-      const [user]    = await sequelize.query('SELECT name, email FROM users WHERE id = ?', { replacements: [client_id], type: sequelize.QueryTypes.SELECT });
-      const [svcInfo] = await sequelize.query('SELECT name FROM services WHERE id = ?',      { replacements: [service_id], type: sequelize.QueryTypes.SELECT });
-      await sendBookingConfirmation({ to: user.email, name: user.name, bookingId, serviceName: svcInfo.name, date, timeStart: time_start, location, paymentMethod: method });
-    } catch (e) { console.warn('Email error:', e.message); }
-
+    // ── Answer the client NOW ───────────────────────────────────────────────
+    // The booking is committed, so it exists. Everything below is after-care:
+    // an in-app notification and a confirmation email.
+    //
+    // These used to run BEFORE this response, and the email was awaited despite
+    // a comment calling it non-blocking. The browser therefore sat on the
+    // spinner through two more queries and a full Gmail handshake — which is
+    // why the confirmation arrived while the booking page was still loading,
+    // and why an impatient client could press Submit a second time.
     res.status(201).json({ message: 'Booking submitted successfully.', booking_id: bookingId });
+
+    // ── After-care, with nobody waiting on it ───────────────────────────────
+    (async () => {
+      try {
+        await createNotification(
+          client_id, bookingId,
+          `Your booking #${bookingId} has been submitted and is pending confirmation.`,
+          'booking'
+        );
+      } catch (e) { console.warn('Notification error:', e.message); }
+
+      try {
+        // Independent lookups — fetched together.
+        const [[user], [svcInfo]] = await Promise.all([
+          sequelize.query('SELECT name, email FROM users WHERE id = ?',
+            { replacements: [client_id], type: sequelize.QueryTypes.SELECT }),
+          sequelize.query('SELECT name FROM services WHERE id = ?',
+            { replacements: [service_id], type: sequelize.QueryTypes.SELECT }),
+        ]);
+        await sendBookingConfirmation({
+          to: user.email, name: user.name, bookingId, serviceName: svcInfo.name,
+          date, timeStart: time_start, location, paymentMethod: method,
+        });
+      } catch (e) { console.warn('Email error:', e.message); }
+    })();
   } catch (e) {
     console.error('createBooking error:', e.message);
-    res.status(500).json({ message: 'Failed to create booking.' });
+    // The success response is now sent before the after-care runs, so guard
+    // against answering twice — a second send would throw "Cannot set headers
+    // after they are sent" and bury the original error.
+    if (!res.headersSent)
+      res.status(500).json({ message: 'Failed to create booking.' });
   }
 };
 
