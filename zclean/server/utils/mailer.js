@@ -15,6 +15,17 @@ const createTransporter = () => nodemailer.createTransport({
     pass: process.env.SMTP_PASS,
   },
   tls: { rejectUnauthorized: false },
+  // ── Fail fast instead of hanging ──────────────────────────────────────────
+  // Some hosts (Render's free tier among them) block outbound SMTP ports. A
+  // blocked port does not refuse the connection — it swallows it, so without
+  // these the send sits waiting for nodemailer's default two-minute socket
+  // timeout. Anything awaiting the send inherits that wait.
+  //
+  // With these, a blocked or unreachable mail server is reported in about ten
+  // seconds and the error reaches the log, where it can be acted on.
+  connectionTimeout: 8000,   // TCP connect
+  greetingTimeout:   8000,   // waiting for the server's 220 banner
+  socketTimeout:    10000,   // inactivity once connected
 });
 
 // ── OTP Email ─────────────────────────────────────────────────────────────────

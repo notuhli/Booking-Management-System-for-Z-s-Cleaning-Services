@@ -407,23 +407,35 @@ exports.updateBookingStatus = async (req, res) => {
         done:      'Your service has been completed. Payment is still outstanding — thank you!',
         completed: 'Your service is complete and payment received. Thank you!',
       };
-      if (msgs[finalStatus]) await createNotification(bk.client_id, parseInt(req.params.id), msgs[finalStatus], finalStatus);
-      // Send confirmation email when admin confirms
-      if (status === 'confirmed') {
+      // ── Notify and email WITHOUT holding up the admin ────────────────────
+      // Both of these used to be awaited before the response. The email in
+      // particular is a full SMTP exchange, and on a host that blocks outbound
+      // SMTP it does not fail quickly — it hangs until the socket times out,
+      // which is why confirming a booking took so long. The status is already
+      // saved by this point, so neither step needs the admin waiting on it.
+      (async () => {
         try {
-          await sendBookingConfirmedEmail({
-            to:            bk.client_email,
-            name:          bk.client_name,
-            bookingId:     req.params.id,
-            serviceName:   bk.service_name,
-            date:          bk.date,
-            timeStart:     '9:00 AM',
-            location:      bk.location,
-            paymentMethod: bk.payment_method,
-            total:         bk.total_price,
-          });
-        } catch (e) { console.warn('Confirmed email error:', e.message); }
-      }
+          if (msgs[finalStatus])
+            await createNotification(bk.client_id, parseInt(req.params.id),
+                                     msgs[finalStatus], finalStatus);
+        } catch (e) { console.warn('Notification error:', e.message); }
+
+        if (status === 'confirmed') {
+          try {
+            await sendBookingConfirmedEmail({
+              to:            bk.client_email,
+              name:          bk.client_name,
+              bookingId:     req.params.id,
+              serviceName:   bk.service_name,
+              date:          bk.date,
+              timeStart:     '9:00 AM',
+              location:      bk.location,
+              paymentMethod: bk.payment_method,
+              total:         bk.total_price,
+            });
+          } catch (e) { console.warn('Confirmed email error:', e.message); }
+        }
+      })();
     }
     res.json({ message: 'Booking status updated.' });
   } catch (e) {
