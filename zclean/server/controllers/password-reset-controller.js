@@ -26,32 +26,47 @@ exports.forgotPassword = async (req, res) => {
       { replacements: [user.id, otp, expiresAt] }
     );
 
-    try {
-      await sendOtpEmail({ to: user.email, name: user.name, otp });
-      return res.json({ message: 'OTP sent to your email address.' });
-    } catch (emailErr) {
-      if (emailErr.message === 'SMTP_NOT_CONFIGURED') {
-        // The code may ONLY leave the server in a response while developing.
-        // Gating this on the email error alone meant a production box with
-        // expired SMTP credentials would return the reset code to the caller.
-        if (process.env.NODE_ENV !== 'production') {
-          console.warn(`[dev] SMTP not configured — OTP for ${user.email}: ${otp}`);
-          return res.json({
-            message: 'Email not configured. Use this code (visible in server console too):',
-            dev_otp: otp,
-            dev_mode: true,
-          });
+    // ── Send the email WITHOUT making the caller wait for it ────────────────
+    // This used to `await` the send before responding, which meant the page sat
+    // waiting through a DNS lookup, a TCP connect, a STARTTLS handshake, an
+    // SMTP login and the send itself — 2-5 seconds against Gmail, and a new
+    // connection every time because the transporter is not pooled.
+    //
+    // The code is already saved above, so it is valid the moment this returns;
+    // nothing about the reset depends on Gmail having finished accepting the
+    // message. Failures are logged server-side, where they can be acted on.
+    //
+    // This also closes a timing side-channel. Before, an address that EXISTED
+    // took seconds to answer while one that did not answered instantly, so the
+    // response time revealed which was which — defeating the deliberately vague
+    // "If that email exists" wording. Both paths now return at the same speed.
+    const devMode = process.env.NODE_ENV !== 'production';
+    sendOtpEmail({ to: user.email, name: user.name, otp })
+      .catch((emailErr) => {
+        if (emailErr.message === 'SMTP_NOT_CONFIGURED') {
+          console.error('SMTP is not configured — password reset email not sent.');
+        } else {
+          // The underlying message describes server internals: log it, never
+          // return it.
+          console.error('Email send failed:', emailErr.message);
         }
-        console.error('SMTP is not configured — password reset email could not be sent.');
-        return res.status(500).json({ message: 'Could not send the reset email. Please contact us at 0916-213-3460.' });
-      }
-      // Real email error (wrong credentials, network, etc.). The underlying
-      // message is logged, never returned — it describes server internals.
-      console.error('Email send failed:', emailErr.message);
-      return res.status(500).json({
-        message: 'Could not send the reset email. Please try again later.',
+      });
+
+    // While developing, the code is still returned so the flow can be tested
+    // without SMTP. NODE_ENV is the only gate — a production server with
+    // expired credentials must never hand the reset code to the caller.
+    if (devMode && (!process.env.SMTP_USER || !process.env.SMTP_PASS ||
+                    process.env.SMTP_USER.trim() === '' ||
+                    process.env.SMTP_PASS.trim() === '')) {
+      console.warn(`[dev] SMTP not configured — OTP for ${user.email}: ${otp}`);
+      return res.json({
+        message: 'Email not configured. Use this code (visible in server console too):',
+        dev_otp: otp,
+        dev_mode: true,
       });
     }
+
+    return res.json({ message: 'If that email exists, an OTP has been sent.' });
   } catch (e) {
     console.error('forgotPassword error:', e.message);
     res.status(500).json({ message: 'Server error. Please try again.' });
