@@ -8,6 +8,7 @@ const cors    = require('cors');
 const helmet  = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { receiptGuard } = require('./middleware/receipt-guard');
+const storage = require('./utils/storage');
 const jwt     = require('jsonwebtoken');
 const path    = require('path');
 const fs      = require('fs');
@@ -87,7 +88,32 @@ app.use(express.json({ limit: '1mb' }));
 // guard cannot be walked around. Service photos, the GCash QR and chat images
 // stay public — they are meant to be seen.
 app.use('/uploads/receipts', receiptGuard);
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Files are read back through storage.js rather than straight off the disk,
+// because on a host with an ephemeral filesystem the disk is empty again after
+// every restart. storage.js serves them from Supabase Storage when it is
+// configured and from the local uploads/ folder otherwise, so this one route
+// covers both and the stored URLs never changed.
+app.get('/uploads/:folder/:filename', async (req, res) => {
+  const { folder, filename } = req.params;
+  // Only the four known folders, and no path traversal out of them.
+  if (!['services', 'gcash', 'receipts', 'chat'].includes(folder) ||
+      /[\\/]|\.\./.test(filename)) {
+    return res.status(404).end();
+  }
+  try {
+    const file = await storage.get(folder, filename);
+    if (!file) return res.status(404).end();
+    res.set('Content-Type', file.contentType);
+    res.set('Cache-Control', folder === 'receipts'
+      ? 'private, max-age=300'       // a receipt is one person's payment record
+      : 'public, max-age=86400');
+    res.send(file.buffer);
+  } catch (e) {
+    console.error('serve upload error:', e.message);
+    res.status(500).end();
+  }
+});
 
 // Routes
 app.use('/api/auth',          require('./routes/auth-routes'));

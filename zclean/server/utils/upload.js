@@ -1,7 +1,6 @@
-const multer = require('multer');
-const path   = require('path');
-const fs     = require('fs');
-const crypto = require('crypto');
+const multer  = require('multer');
+const crypto  = require('crypto');
+const storage = require('./storage');
 
 // ── Uploads ──────────────────────────────────────────────────────────────────
 // Everything a person can put on this server comes through here, so all of it
@@ -36,30 +35,37 @@ const ALLOWED = {
 
 const MAX_BYTES = 5 * 1024 * 1024;   // 5 MB — comfortably above a phone photo
 
-const makeStorage = (folder) => multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(__dirname, '..', 'uploads', folder);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    // Random name, and an extension WE choose — never the user's filename.
-    // Also fixes two uploads in the same millisecond overwriting each other.
-    const ext = ALLOWED[file.mimetype] || '.bin';
-    cb(null, `${folder}-${crypto.randomUUID()}${ext}`);
-  },
-});
+// Files are held in memory first, then handed to storage.js. Previously multer
+// wrote straight to disk, which on an ephemeral host meant the file was gone
+// after the next restart. Buffering also lets the magic-byte check below run
+// BEFORE anything is stored, so a disguised file never lands anywhere at all.
+const makeStorage = () => multer.memoryStorage();
+
+// The name we give the file: random, with an extension WE choose from the
+// whitelist — never the user's filename. Also fixes two uploads in the same
+// millisecond overwriting each other.
+const makeName = (folder, mimetype) =>
+  `${folder}-${crypto.randomUUID()}${ALLOWED[mimetype] || '.bin'}`;
 
 const imageFilter = (req, file, cb) => {
   if (ALLOWED[file.mimetype]) cb(null, true);
   else cb(new Error('Only JPG, PNG, WebP or GIF images are allowed.'), false);
 };
 
-const makeUploader = (folder) => multer({
-  storage: makeStorage(folder),
-  fileFilter: imageFilter,
-  limits: { fileSize: MAX_BYTES, files: 1 },
-});
+const makeUploader = (folder) => {
+  const mw = multer({
+    storage: makeStorage(),
+    fileFilter: imageFilter,
+    limits: { fileSize: MAX_BYTES, files: 1 },
+  });
+  // Remember which folder this uploader is for, so verifyImage knows where to
+  // store the file once it has proved to be a real image.
+  const wrap = (handler) => (req, res, next) => {
+    req._uploadFolder = folder;
+    handler(req, res, next);
+  };
+  return { single: (field) => wrap(mw.single(field)) };
+};
 
 // ── verifyImage ──────────────────────────────────────────────────────────────
 // Runs AFTER multer has written the file, and checks what the bytes actually
@@ -80,25 +86,34 @@ const looksLikeImage = (buf) => SIGNATURES.some(sig => {
   return true;
 });
 
-const verifyImage = (req, res, next) => {
+// The check now runs on the in-memory buffer, BEFORE the file is stored, so a
+// disguised file is refused without ever being written. Only once it has proved
+// to be a real image is it handed to storage.js, which puts it in Supabase
+// Storage when deployed and on local disk otherwise.
+const verifyImage = async (req, res, next) => {
   if (!req.file) return next();               // nothing uploaded — not our problem
   try {
-    const fd  = fs.openSync(req.file.path, 'r');
-    const buf = Buffer.alloc(12);
-    fs.readSync(fd, buf, 0, 12, 0);
-    fs.closeSync(fd);
-
-    if (!looksLikeImage(buf)) {
-      fs.unlink(req.file.path, () => {});     // never leave it on disk
+    if (!looksLikeImage(req.file.buffer)) {
       return res.status(400).json({
         message: 'That file is not a valid image. Please upload a JPG, PNG, WebP or GIF.',
       });
     }
+
+    const folder   = req._uploadFolder || 'misc';
+    const filename = makeName(folder, req.file.mimetype);
+
+    await storage.put(folder, filename, req.file.buffer, req.file.mimetype);
+
+    // The controllers build their URL from `filename`, exactly as before, so
+    // nothing downstream of here had to change.
+    req.file.filename = filename;
+    req.file.folder   = folder;
+    delete req.file.buffer;                   // don't carry 5 MB any further
+
     next();
   } catch (e) {
-    console.error('verifyImage error:', e.message);
-    if (req.file?.path) fs.unlink(req.file.path, () => {});
-    res.status(400).json({ message: 'Could not read the uploaded file. Please try again.' });
+    console.error('verifyImage/store error:', e.message);
+    res.status(500).json({ message: 'Could not save the uploaded file. Please try again.' });
   }
 };
 
