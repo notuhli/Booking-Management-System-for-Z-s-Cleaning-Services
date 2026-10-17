@@ -213,6 +213,34 @@ export default function BookingPage() {
   const [showTerms,   setShowTerms]   = useState(false);   // terms popup before submit
   const [receiptFile, setReceiptFile] = useState(null);
   const [receiptPreview,setReceiptPreview] = useState(null);
+  const [receiptError, setReceiptError] = useState('');
+
+  // ── Check the receipt the moment it is chosen ───────────────────────────
+  // Without this the client only found out the file was rejected AFTER filling
+  // in the rest of the form and waiting for the whole upload — which on phone
+  // data is a long wait for a confusing failure. A photo taken of a GCash
+  // screen can easily exceed 5 MB; a screenshot almost never does, so the
+  // message says which to use. Same limits the server enforces.
+  const pickReceipt = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';                  // allow re-picking the same file
+    if (!f) return;
+    setReceiptError('');
+
+    if (!f.type.startsWith('image/')) {
+      setReceiptFile(null); setReceiptPreview(null);
+      return setReceiptError('Please choose an image file (JPG, PNG, WebP or GIF).');
+    }
+    if (f.size > 5 * 1024 * 1024) {
+      setReceiptFile(null); setReceiptPreview(null);
+      return setReceiptError(
+        `That image is ${(f.size / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB. ` +
+        `A screenshot of your GCash receipt is usually much smaller than a photo of the screen.`
+      );
+    }
+    setReceiptFile(f);
+    setReceiptPreview(URL.createObjectURL(f));
+  };
   const [qrError,     setQrError]      = useState(false);
 
   const [form, setForm] = useState({
@@ -576,11 +604,12 @@ export default function BookingPage() {
                   <label className="label">
                     Upload ₱{reservationFee.toLocaleString()} GCash Receipt <span className="text-red-500">*</span>
                   </label>
-                  <input type="file" accept="image/*" onChange={e => {
-                    const f = e.target.files[0]; if (!f) return;
-                    setReceiptFile(f); setReceiptPreview(URL.createObjectURL(f));
-                  }} className="block w-full text-sm file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-green-600 file:text-white hover:file:bg-green-700 cursor-pointer"
+                  <input type="file" accept="image/*" onChange={pickReceipt}
+                    className="block w-full text-sm file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-green-600 file:text-white hover:file:bg-green-700 cursor-pointer"
                     style={{ color: 'var(--text-muted)' }}/>
+                  {receiptError && (
+                    <p className="mt-2 text-xs font-medium text-red-600">{receiptError}</p>
+                  )}
                   {receiptPreview && <img src={receiptPreview} alt="Receipt" className="mt-3 rounded-xl max-h-48 object-contain" style={{ border: '1px solid var(--border)' }}/>}
                 </div>
               </div>

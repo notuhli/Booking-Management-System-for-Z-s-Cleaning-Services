@@ -240,9 +240,21 @@ export default function AdminServices() {
     });
   };
 
+  // Same check the chat uploads already do, and the same limits the server
+  // enforces — so an oversized photo is refused here instead of after the
+  // whole upload has crawled up and been rejected.
   const handleImgChange = (e) => {
     const f = e.target.files[0];
     if (!f) return;
+    if (!f.type.startsWith('image/')) {
+      setImgFile(null); setImgPreview(null);
+      return setErr('Please choose an image file (JPG, PNG, WebP or GIF).');
+    }
+    if (f.size > 5 * 1024 * 1024) {
+      setImgFile(null); setImgPreview(null);
+      return setErr(`That image is ${(f.size / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB.`);
+    }
+    setErr('');
     setImgFile(f);
     setImgPreview(URL.createObjectURL(f));
   };
