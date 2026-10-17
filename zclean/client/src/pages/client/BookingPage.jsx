@@ -214,6 +214,7 @@ export default function BookingPage() {
   const [receiptFile, setReceiptFile] = useState(null);
   const [receiptPreview,setReceiptPreview] = useState(null);
   const [receiptError, setReceiptError] = useState('');
+  const [qrModal, setQrModal] = useState(null);   // enlarged GCash QR
 
   // ── Check the receipt the moment it is chosen ───────────────────────────
   // Without this the client only found out the file was rejected AFTER filling
@@ -562,9 +563,20 @@ export default function BookingPage() {
                 </p>
                 <div className="flex flex-col sm:flex-row gap-4">
                   {settings.gcash_qr_url && settings.gcash_qr_url.trim() && !qrError ? (
-                    <img src={settings.gcash_qr_url} alt="GCash QR" className="w-32 h-32 object-contain rounded-xl bg-white p-1 shrink-0"
-                      style={{ border: '1px solid var(--border)' }}
-                      onError={() => setQrError(true)}/>
+                    // Tap to enlarge. At 128px a QR is awkward to scan from a
+                    // second phone, and on a phone it cannot be opened in a new
+                    // tab the way a desktop user would right-click to do.
+                    <button type="button" onClick={() => setQrModal(settings.gcash_qr_url)}
+                      className="shrink-0 rounded-xl focus:outline-none focus:ring-2 focus:ring-green-600"
+                      title="Tap to enlarge">
+                      <img src={settings.gcash_qr_url} alt="GCash QR — tap to enlarge"
+                        className="w-32 h-32 object-contain rounded-xl bg-white p-1 cursor-pointer hover:opacity-90 transition"
+                        style={{ border: '1px solid var(--border)' }}
+                        onError={() => setQrError(true)}/>
+                      <span className="block text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>
+                        Tap to enlarge
+                      </span>
+                    </button>
                   ) : (
                     <div className="w-32 h-32 rounded-xl flex items-center justify-center text-xs text-center p-3 shrink-0"
                       style={{ border: '2px dashed var(--border)', color: 'var(--text-muted)' }}>
@@ -730,6 +742,21 @@ export default function BookingPage() {
       )}
       {/* Bottom padding so sticky bar doesn't cover last form element */}
       {selectedService && <div className="h-24"/>}
+
+      {/* Enlarged GCash QR — same lightbox the admin uses for receipts.
+          Tapping anywhere closes it. */}
+      {qrModal && (
+        <div className="fixed inset-0 bg-black/80 flex flex-col items-center justify-center z-[60] p-4 modal-overlay-in"
+          onClick={() => setQrModal(null)}>
+          {/* A fixed display width, not max-width: the uploaded QR may itself
+              be small, and `max-w-full` would then render it barely larger than
+              the 128px thumbnail. A QR upscales cleanly and still scans, so
+              filling the screen is what makes this useful. */}
+          <img src={qrModal} alt="GCash QR code"
+            className="w-[min(85vw,420px)] h-auto object-contain rounded-xl bg-white p-3 modal-card-in"/>
+          <p className="text-white/80 text-xs mt-4">Tap anywhere to close</p>
+        </div>
+      )}
     </div>
   );
 }
