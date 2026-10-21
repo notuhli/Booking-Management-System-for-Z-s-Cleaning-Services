@@ -1,6 +1,10 @@
 const sequelize = require('../models/db');
 const { str, date: dateCheck, firstError } = require('../utils/validate');
 const dl = require('../utils/sql-dialect');
+// Same definition of "holds a slot" the booking capacity guards use, so the
+// calendar the client picks a date from can never disagree with the check that
+// accepts or refuses that date.
+const { HOLDS_SLOT } = require('../utils/booking-guards');
 
 exports.getBlockedDates = async (req, res) => {
   try {
@@ -35,7 +39,7 @@ exports.getBookedDates = async (req, res) => {
     const dates = await sequelize.query(`
       SELECT date, COUNT(*) AS cnt
       FROM bookings
-      WHERE status IN ('pending','confirmed')
+      WHERE ${HOLDS_SLOT}
       GROUP BY date
       ORDER BY date ASC
     `, { type: sequelize.QueryTypes.SELECT });

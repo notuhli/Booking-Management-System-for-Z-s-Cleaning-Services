@@ -125,6 +125,10 @@ export default function AdminBookings() {
   const [showPayment, setShowPayment] = useState(false);
   const [payAmount,   setPayAmount]   = useState('');
 
+  // Turning down a GCash receipt that does not check out
+  const [showReject,   setShowReject]   = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
+
   // House size corrected after the ocular inspection
   const [showSizeEdit, setShowSizeEdit] = useState(false);
   const [sizeRange,    setSizeRange]    = useState('under_100');
@@ -435,6 +439,42 @@ export default function AdminBookings() {
       setSelected(null);
     } catch (e) {
       showToast(e.response?.data?.message || "Couldn't verify the GCash payment — try again.", 'error');
+    } finally { setSubmitting(false); }
+  };
+
+  // Rejecting a receipt. The reason is required: it is what the client is shown
+  // and emailed, so they know what to fix instead of being left guessing.
+  const doRejectGcash = async () => {
+    const reason = rejectReason.trim();
+    if (!reason) return showToast('Please say why the receipt was rejected.', 'error');
+    try {
+      setSubmitting(true);
+      const { data } = await bookingsAPI.rejectGcash(selected.id, reason);
+      showToast(data?.message || 'Receipt rejected.', 'success');
+      setShowReject(false);
+      setRejectReason('');
+      load();
+      setSelected(null);
+    } catch (e) {
+      showToast(e.response?.data?.message || "Couldn't reject the receipt — try again.", 'error');
+    } finally { setSubmitting(false); }
+  };
+
+  // The way out when the receipts keep failing. Cancelling frees the date,
+  // which a rejected booking no longer holds anyway.
+  const doCancelRejected = async (id) => {
+    if (!window.confirm(
+      'Cancel this booking?\n\nThe client is told it was cancelled and can book again. ' +
+      'This cannot be undone.'
+    )) return;
+    try {
+      setSubmitting(true);
+      const { data } = await bookingsAPI.cancelRejected(id);
+      showToast(data?.message || 'Booking cancelled.', 'success');
+      load();
+      setSelected(null);
+    } catch (e) {
+      showToast(e.response?.data?.message || "Couldn't cancel the booking — try again.", 'error');
     } finally { setSubmitting(false); }
   };
 
@@ -856,6 +896,44 @@ export default function AdminBookings() {
                 )}
               </div>
 
+              {/* A receipt that was turned down. Shown so the admin can see
+                  what was said to the client, and so a booking sitting idle is
+                  explained rather than looking stuck. */}
+              {selected.payment_status === 'rejected' && (
+                <div className="flex items-start gap-2 text-xs px-3 py-2 rounded-lg"
+                  style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c' }}>
+                  <AlertTriangle size={13} className="shrink-0 mt-0.5"/>
+                  <span>
+                    <strong>Receipt rejected.</strong>{' '}
+                    {selected.receipt_rejected_reason || 'No reason recorded.'}
+                    {' '}Waiting for the client to upload a new one. This booking no
+                    longer holds the date.
+                  </span>
+                </div>
+              )}
+
+              {/* If the receipts keep failing, this ends it. Shown only on a
+                  rejected booking — ordinary cancellation stays unavailable. */}
+              {selected.payment_status === 'rejected' && selected.status !== 'cancelled' && (
+                <button type="button" disabled={submitting}
+                  onClick={() => doCancelRejected(selected.id)}
+                  className="btn-secondary w-full !py-2 text-xs flex items-center justify-center gap-1.5"
+                  style={{ color: '#b91c1c', borderColor: '#fecaca' }}>
+                  <XCircle size={13} /> Cancel this booking
+                </button>
+              )}
+
+              {/* The GCash reference the client typed, which is what the admin
+                  checks against the business GCash app. */}
+              {selected.gcash_reference && (
+                <div>
+                  <p className="eyebrow mb-0.5">GCash Reference</p>
+                  <p className="font-mono text-sm" style={{ color: 'var(--text-primary)' }}>
+                    {selected.gcash_reference}
+                  </p>
+                </div>
+              )}
+
               {/* GCash receipt thumbnail */}
               {selected.gcash_receipt && (
                 <div>
@@ -1013,10 +1091,57 @@ export default function AdminBookings() {
               </div>
             )}
 
+            {/* ── Rejecting a receipt ──────────────────────────────────────
+                The admin checks the reference number and amount against the
+                business GCash app. If it does not match, this is the way to say
+                so — the reason is required, because it is sent to the client. */}
+            {showReject && (
+              <div className="px-5 pb-4 pt-2 space-y-3"
+                style={{ borderTop: '1px solid var(--border)', background: 'var(--surface2)' }}>
+                <p className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>
+                  Reject this GCash receipt
+                </p>
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  The booking stays pending and the slot is not held. The client is
+                  notified with your reason and can upload a new receipt.
+                </p>
+
+                <div>
+                  <label className="label">Reason (sent to the client)</label>
+                  <input className="input text-sm" maxLength={255} value={rejectReason}
+                    onChange={e => setRejectReason(e.target.value)}
+                    placeholder="e.g. reference number not found in our GCash record"/>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {['Reference number not found in our GCash record',
+                    'Amount received is less than the reservation fee',
+                    'Receipt is unreadable',
+                    'Receipt is for a different account'].map(r => (
+                    <button key={r} type="button" onClick={() => setRejectReason(r)}
+                      className="text-[11px] px-2 py-1 rounded-lg border"
+                      style={{ borderColor: 'var(--border)', color: 'var(--text-muted)' }}>
+                      {r}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex gap-2">
+                  <button onClick={() => { setShowReject(false); setRejectReason(''); }}
+                    className="btn-secondary flex-1 text-sm">Cancel</button>
+                  <button onClick={doRejectGcash} disabled={submitting || !rejectReason.trim()}
+                    className="btn-primary flex-1 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ background: '#dc2626', borderColor: '#dc2626' }}>
+                    {submitting ? 'Rejecting…' : 'Reject Receipt'}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* ── Action Buttons — one primary action per screen principle ──
                 Secondary actions (Reschedule, Verify GCash) sit above in a smaller row.
                 The single dominant action for this booking's status is full-width below. */}
-            {!showReschedule && !showSizeEdit && !showPayment && (
+            {!showReschedule && !showSizeEdit && !showPayment && !showReject && (
               <div className="px-5 pb-5 space-y-2"
                 style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
 
@@ -1076,6 +1201,14 @@ export default function AdminBookings() {
                     <button disabled={submitting} onClick={() => verifyGcash(selected.id)}
                       className="btn-primary w-full !py-3 text-sm flex items-center justify-center gap-2">
                       <CheckCircle size={15} /> Verify GCash Receipt
+                    </button>
+                    {/* Checking a receipt has two possible answers. Without
+                        this, a receipt that did not check out left the admin
+                        with nothing to click. */}
+                    <button disabled={submitting} onClick={() => setShowReject(true)}
+                      className="btn-secondary w-full !py-2.5 text-sm flex items-center justify-center gap-2"
+                      style={{ color: '#dc2626', borderColor: '#fecaca' }}>
+                      <XCircle size={15} /> Reject Receipt
                     </button>
                     {selected.status === 'pending' && (
                       <Why>The booking can be confirmed once the receipt is verified.</Why>

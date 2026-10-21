@@ -33,6 +33,45 @@ export default function BookingHistory() {
 
   const [responding, setResponding] = useState(null); // booking id being responded to
 
+  // Uploading a replacement receipt after the admin rejected the first one.
+  const [reuploadFor, setReuploadFor] = useState(null);   // booking id, or null
+  const [reuploadRef, setReuploadRef] = useState('');
+  const [reuploadErr, setReuploadErr] = useState('');
+
+  // Same checks the booking form makes, so a file that the server would refuse
+  // is caught here instead of after a slow upload on a phone connection.
+  const pickNewReceipt = (file) => {
+    setReuploadErr('');
+    if (!file) return null;
+    if (!/^image\/(jpe?g|png|webp)$/.test(file.type)) {
+      setReuploadErr('Please choose an image file (JPG, PNG or WEBP).');
+      return null;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setReuploadErr('That image is over 5MB. A screenshot from your GCash app is usually much smaller than a photo of the screen.');
+      return null;
+    }
+    return file;
+  };
+
+  const submitNewReceipt = async (bookingId, file) => {
+    const ok = pickNewReceipt(file);
+    if (!ok) return;
+    try {
+      setSubmitting(true);
+      const fd = new FormData();
+      fd.append('gcash_receipt', ok);
+      if (reuploadRef.trim()) fd.append('gcash_reference', reuploadRef.trim());
+      const { data } = await bookingsAPI.reuploadReceipt(bookingId, fd);
+      showToast(data?.message || 'New receipt uploaded.', 'success');
+      setReuploadFor(null);
+      setReuploadRef('');
+      load(true);
+    } catch (e) {
+      showToast(e.response?.data?.message || "Couldn't upload the receipt — try again.", 'error');
+    } finally { setSubmitting(false); }
+  };
+
   const handleRescheduleResponse = async (bookingId, action) => {
     try {
       setResponding(bookingId);
@@ -311,6 +350,7 @@ export default function BookingHistory() {
                               : b.payment_status === 'partial'
                                 ? `Paid ₱${Number(b.amount_paid || 0).toLocaleString()} · Balance ₱${Math.max(0, Number(b.total_price ?? b.service_price ?? 0) - Number(b.amount_paid || 0)).toLocaleString()}`
                               : b.payment_status === 'pending_verification' ? 'Receipt under review'
+                              : b.payment_status === 'rejected' ? 'Receipt not accepted'
                               : 'Unpaid'}
                           </span>
                         </div>
@@ -327,6 +367,57 @@ export default function BookingHistory() {
                         <p className="font-mono" style={{ color: 'var(--text-primary)' }}>{b.id}</p>
                       </div>
                     </div>
+
+                    {/* ── Receipt was not accepted ─────────────────────────
+                        A rejection has to come with a way forward, otherwise
+                        the booking just stops and the client is left guessing.
+                        The reason is the admin's own words. */}
+                    {b.payment_status === 'rejected' && (
+                      <div className="rounded-xl px-3 py-3 space-y-2"
+                        style={{ background: '#fef2f2', border: '1px solid #fecaca' }}>
+                        <p className="text-sm font-semibold" style={{ color: '#b91c1c' }}>
+                          We couldn't verify your GCash receipt
+                        </p>
+                        {b.receipt_rejected_reason && (
+                          <p className="text-xs" style={{ color: '#b91c1c' }}>
+                            <strong>Reason:</strong> {b.receipt_rejected_reason}
+                          </p>
+                        )}
+                        <p className="text-xs" style={{ color: '#7f1d1d' }}>
+                          Your booking is still saved, but the schedule is not held yet.
+                          Please upload a new receipt.
+                        </p>
+
+                        {reuploadFor === b.id ? (
+                          <div className="space-y-2">
+                            <div>
+                              <label className="label">GCash reference number (optional)</label>
+                              <input className="input text-sm" maxLength={50} value={reuploadRef}
+                                onChange={e => setReuploadRef(e.target.value)}
+                                placeholder="The reference shown in your GCash app"/>
+                            </div>
+                            <input type="file" accept="image/jpeg,image/png,image/webp"
+                              disabled={submitting}
+                              onChange={e => submitNewReceipt(b.id, e.target.files?.[0])}
+                              className="text-xs w-full"/>
+                            {reuploadErr && (
+                              <p className="text-xs" style={{ color: '#b91c1c' }}>{reuploadErr}</p>
+                            )}
+                            <button type="button" className="text-xs underline"
+                              style={{ color: '#7f1d1d' }}
+                              onClick={() => { setReuploadFor(null); setReuploadRef(''); setReuploadErr(''); }}>
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button type="button" className="btn-primary text-xs !py-2 w-full"
+                            style={{ background: '#dc2626', borderColor: '#dc2626' }}
+                            onClick={() => { setReuploadFor(b.id); setReuploadRef(''); setReuploadErr(''); }}>
+                            Upload a new receipt
+                          </button>
+                        )}
+                      </div>
+                    )}
 
                     {b.notes && (
                       <div>

@@ -292,3 +292,45 @@ exports.sendEmailChangedNotice = async ({ to, name, newEmail }) => {
     console.error('Email-changed notice error:', e.message);
   }
 };
+
+// ── GCash Receipt Rejected ────────────────────────────────────────────────────
+// Sent when the admin checks an uploaded receipt and turns it down — the amount
+// is short, the reference number is not in the business GCash record, or the
+// image has been altered. A rejection must never be silent: the client is told
+// why, and told exactly what to do next, otherwise the booking simply stops
+// moving and they are left guessing.
+exports.sendReceiptRejectedEmail = async ({ to, name, bookingId, serviceName, date, reason }) => {
+  if (!mailConfigured()) {
+    console.log(`📧 [No mailer] Receipt-rejected email skipped for booking #${bookingId} → ${to}`);
+    return;
+  }
+  try {
+    await deliver({
+      to,
+      subject: `Action needed: GCash receipt for booking #${bookingId} — Z's Cleaning Services`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;">
+          ${BRAND}
+          <div style="background:#f9fafb;padding:28px 24px;border:1px solid #e5e7eb;">
+            <p style="color:#111;font-size:16px;font-weight:700;margin:0 0 6px;">Hi ${name},</p>
+            <p style="color:#b91c1c;font-size:15px;font-weight:700;margin:0 0 20px;">We could not verify the GCash receipt for your booking.</p>
+            <p style="color:#4b5563;font-size:13px;margin:0 0 16px;">Your booking is still saved, but the schedule is not yet held. Please send a new receipt so we can confirm it for you.</p>
+            <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:20px;">
+              <tr style="background:#fef2f2;"><td colspan="2" style="padding:8px 10px;font-weight:700;color:#991b1b;border-radius:6px 6px 0 0;">Booking Details</td></tr>
+              <tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px 10px;color:#6b7280;width:40%;">Booking #</td><td style="padding:8px 10px;font-weight:700;">#${bookingId}</td></tr>
+              <tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px 10px;color:#6b7280;">Service</td><td style="padding:8px 10px;font-weight:700;">${serviceName}</td></tr>
+              <tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px 10px;color:#6b7280;">Date</td><td style="padding:8px 10px;font-weight:700;">${date}</td></tr>
+            </table>
+            <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
+              <p style="color:#991b1b;font-size:13px;margin:0;"><strong>Reason:</strong> ${reason}</p>
+            </div>
+            <p style="color:#4b5563;font-size:13px;margin:0 0 8px;font-weight:700;">What to do next</p>
+            <p style="color:#4b5563;font-size:13px;margin:0 0 16px;line-height:1.6;">Open <strong>My Bookings</strong> in your account, find booking #${bookingId}, and upload a new GCash receipt. Please include the reference number shown in your GCash app so we can match the payment.</p>
+            <p style="color:#9ca3af;font-size:12px;margin:0;">Questions? Call us at <strong>0916-213-3460</strong> or message us in the app.</p>
+          </div>
+        </div>`,
+    });
+  } catch (e) {
+    console.error('Receipt-rejected email error:', e.message);
+  }
+};

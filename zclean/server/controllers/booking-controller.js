@@ -2,11 +2,12 @@ const sequelize = require('../models/db');
 const bcrypt    = require('bcryptjs');
 const crypto    = require('crypto');
 const dl = require('../utils/sql-dialect');
-const { bookingLockReason } = require('../utils/booking-guards');
+const { bookingLockReason, HOLDS_SLOT } = require('../utils/booking-guards');
 const { resolveTransportFee } = require('../utils/transport-fee');
 const { resolveAreaSurcharge } = require('../utils/area-surcharge');
 const { syncPaymentStatus, getReservationFee } = require('../utils/payment-status');
-const { sendBookingConfirmation, sendBookingConfirmedEmail } = require('../utils/mailer');
+const { sendBookingConfirmation, sendBookingConfirmedEmail,
+        sendReceiptRejectedEmail } = require('../utils/mailer');
 
 // ── Helper: create a client notification ─────────────────────────────────────
 const createNotification = async (userId, bookingId, message, type = 'info') => {
@@ -127,7 +128,7 @@ exports.createBooking = async (req, res) => {
       // Max 2 bookings per day — a capacity limit, not a time-overlap check:
       // every service starts at 9:00 AM, so daily capacity IS the conflict rule.
       const [[dayCount]] = await sequelize.query(
-        "SELECT COUNT(*) AS cnt FROM bookings WHERE date = ? AND status IN ('pending','confirmed')",
+        `SELECT COUNT(*) AS cnt FROM bookings WHERE date = ? AND ${HOLDS_SLOT}`,
         { replacements: [bookDate], transaction: t }
       );
       if (parseInt(dayCount.cnt) >= 2) {
@@ -269,6 +270,7 @@ exports.getMyBookings = async (req, res) => {
       SELECT b.id, b.client_id, b.service_id, b.date, b.time_start, b.time_end,
              b.location, b.status, b.notes, b.payment_method, b.payment_status,
              b.gcash_receipt, b.sqm_range, b.area_surcharge, b.transport_fee,
+             b.gcash_reference, b.receipt_rejected_reason, b.receipt_rejected_at,
              b.created_at,
              COALESCE(b.proposed_date, NULL) AS proposed_date,
              COALESCE(b.proposed_time, NULL) AS proposed_time,
@@ -353,6 +355,13 @@ exports.updateBookingStatus = async (req, res) => {
     if (status === 'confirmed' && bk0.payment_status === 'pending_verification')
       return res.status(409).json({
         message: 'Verify the GCash receipt before confirming this booking.',
+      });
+
+    // A receipt that was turned down holds no slot either. Confirming here
+    // would give away the date for a payment the admin has already refused.
+    if (status === 'confirmed' && bk0.payment_status === 'rejected')
+      return res.status(409).json({
+        message: 'The GCash receipt for this booking was rejected. Wait for the client to upload a new one.',
       });
 
     // A service cannot be performed before the day it is booked for.
@@ -534,6 +543,27 @@ exports.verifyGcash = async (req, res) => {
   try {
     const locked = await bookingLockReason(req.params.id);
     if (locked) return res.status(409).json({ message: locked });
+
+    // ── Reclaiming a slot that was released ───────────────────────────────
+    // A rejected booking stops holding its date (see HOLDS_SLOT), so the day
+    // may have been taken by someone else while this client sorted out their
+    // payment. Verifying regardless would quietly push the day over the
+    // two-service limit, which is the exact thing the capacity rule exists to
+    // prevent. Say so instead, and let the admin propose another date.
+    const [pre] = await sequelize.query(
+      'SELECT date, payment_status FROM bookings WHERE id = ?',
+      { replacements: [req.params.id], type: sequelize.QueryTypes.SELECT }
+    );
+    if (pre?.payment_status === 'rejected') {
+      const unavailable = await dateUnavailableReason(
+        String(pre.date).slice(0, 10), req.params.id
+      );
+      if (unavailable)
+        return res.status(409).json({
+          message: `${unavailable} This booking lost its slot when the receipt was rejected — propose a new date before verifying.`,
+        });
+    }
+
     // What the client sent by GCash is normally the RESERVATION, not the whole
     // bill, so verifying records that amount as a payment rather than declaring
     // the booking settled. The admin can pass a different amount if the client
@@ -553,6 +583,15 @@ exports.verifyGcash = async (req, res) => {
         { replacements: [req.params.id, amount] }
       );
     }
+    // If this receipt had been rejected earlier and the admin has now accepted
+    // it, clear the rejection so the client is not still shown a refusal on a
+    // booking that has been paid.
+    await sequelize.query(
+      `UPDATE bookings SET receipt_rejected_reason = NULL, receipt_rejected_at = NULL
+        WHERE id = ? AND receipt_rejected_reason IS NOT NULL`,
+      { replacements: [req.params.id] }
+    );
+
     // Recalculates unpaid / partial / paid, and settles the job only if the
     // total is now covered.
     const summary = await syncPaymentStatus(req.params.id);
@@ -578,6 +617,182 @@ exports.verifyGcash = async (req, res) => {
   }
 };
 
+// ── PATCH /api/bookings/:id/reject-gcash (admin) ─────────────────────────────
+// The other half of verifying. Until now the admin could only ever accept a
+// receipt: a fake, altered or short one left them choosing between confirming a
+// booking nobody paid for and doing nothing, which stranded the booking in
+// 'pending_verification' while the client believed it was being processed.
+//
+// Rejecting records WHY, tells the client, and leaves the booking 'pending' so
+// the slot is not held. The uploaded file is deliberately kept — if the attempt
+// really was fraudulent, that image is the evidence — and is replaced only when
+// the client uploads a new one.
+exports.rejectGcash = async (req, res) => {
+  const reason = String(req.body?.reason || '').trim();
+  if (!reason)
+    return res.status(400).json({ message: 'Please give a reason so the client knows what to fix.' });
+  if (reason.length > 255)
+    return res.status(400).json({ message: 'Please keep the reason under 255 characters.' });
+  try {
+    const locked = await bookingLockReason(req.params.id);
+    if (locked) return res.status(409).json({ message: locked });
+
+    const [bk] = await sequelize.query(
+      `SELECT b.id, b.client_id, b.date, b.payment_status,
+              u.name AS client_name, u.email AS client_email,
+              s.name AS service_name
+         FROM bookings b
+         JOIN users    u ON u.id = b.client_id
+         JOIN services s ON s.id = b.service_id
+        WHERE b.id = ?`,
+      { replacements: [req.params.id], type: sequelize.QueryTypes.SELECT }
+    );
+    if (!bk) return res.status(404).json({ message: 'Booking not found.' });
+
+    // Only a receipt that is actually waiting can be turned down. Rejecting a
+    // booking that is already part-paid would contradict the money recorded.
+    if (bk.payment_status !== 'pending_verification')
+      return res.status(409).json({
+        message: 'There is no receipt waiting to be checked on this booking.',
+      });
+
+    await sequelize.query(
+      `UPDATE bookings
+          SET payment_status = 'rejected',
+              receipt_rejected_reason = ?,
+              receipt_rejected_at = NOW()
+        WHERE id = ?`,
+      { replacements: [reason, req.params.id] }
+    );
+
+    // Answer the admin straight away; telling the client is slower than the
+    // database write and must not hold up the screen.
+    res.json({ message: 'Receipt rejected. The client has been asked to upload a new one.' });
+
+    (async () => {
+      await createNotification(
+        bk.client_id, parseInt(req.params.id),
+        `Your GCash receipt could not be verified: ${reason}. Please upload a new receipt from My Bookings.`,
+        'payment'
+      );
+      await sendReceiptRejectedEmail({
+        to: bk.client_email, name: bk.client_name, bookingId: bk.id,
+        serviceName: bk.service_name, date: String(bk.date).slice(0, 10), reason,
+      });
+    })().catch(e => console.error('rejectGcash notify error:', e.message));
+  } catch (e) {
+    console.error('rejectGcash error:', e.message);
+    if (!res.headersSent) res.status(500).json({ message: 'Failed to reject the receipt.' });
+  }
+};
+
+// ── PATCH /api/bookings/:id/cancel-rejected (admin) ──────────────────────────
+// The way out of a loop. Rejecting a receipt invites the client to send a
+// better one, but nothing stopped a determined person sending fake receipt
+// after fake receipt — the admin could reject forever and the booking would sit
+// there for good.
+//
+// This is NOT general cancellation, which was removed on purpose: it applies
+// only to a booking whose receipt has actually been rejected. 'cancelled' is
+// already terminal (see utils/booking-guards.js) and already frees the date,
+// so one call ends the matter.
+//
+// For a client who keeps trying it, the real remedy is deactivating their
+// account — `users.is_active`, which takes effect on their very next request.
+exports.cancelRejectedBooking = async (req, res) => {
+  const reason = String(req.body?.reason || '').trim()
+    || 'The GCash receipt could not be verified.';
+  try {
+    const locked = await bookingLockReason(req.params.id);
+    if (locked) return res.status(409).json({ message: locked });
+
+    const [bk] = await sequelize.query(
+      'SELECT id, client_id, payment_status FROM bookings WHERE id = ?',
+      { replacements: [req.params.id], type: sequelize.QueryTypes.SELECT }
+    );
+    if (!bk) return res.status(404).json({ message: 'Booking not found.' });
+    if (bk.payment_status !== 'rejected')
+      return res.status(409).json({
+        message: 'Only a booking whose receipt was rejected can be cancelled here.',
+      });
+
+    // Money already recorded against a booking means it is not a dead one,
+    // whatever the receipt said. Refuse rather than erase a paid booking.
+    const [paid] = await sequelize.query(
+      'SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE booking_id = ?',
+      { replacements: [req.params.id], type: sequelize.QueryTypes.SELECT }
+    );
+    if (parseFloat(paid?.total) > 0)
+      return res.status(409).json({
+        message: 'This booking has recorded payments and cannot be cancelled.',
+      });
+
+    await sequelize.query(
+      "UPDATE bookings SET status = 'cancelled' WHERE id = ?",
+      { replacements: [req.params.id] }
+    );
+    res.json({ message: 'Booking cancelled. The date is free again.' });
+
+    createNotification(
+      bk.client_id, parseInt(req.params.id),
+      `Your booking has been cancelled. ${reason} You can make a new booking anytime.`,
+      'booking'
+    ).catch(e => console.error('cancelRejected notify error:', e.message));
+  } catch (e) {
+    console.error('cancelRejectedBooking error:', e.message);
+    if (!res.headersSent) res.status(500).json({ message: 'Failed to cancel the booking.' });
+  }
+};
+
+// ── PATCH /api/bookings/:id/receipt (client) ─────────────────────────────────
+// Without this, a rejection is a dead end: the receipt could only ever be
+// uploaded when the booking was created, so a client told "your receipt was
+// refused" had no way to send another one. This puts the booking back in front
+// of the admin as 'pending_verification'.
+exports.reuploadReceipt = async (req, res) => {
+  try {
+    if (!req.file?.filename)
+      return res.status(400).json({ message: 'Please attach a GCash receipt image.' });
+
+    const [bk] = await sequelize.query(
+      'SELECT id, client_id, payment_status FROM bookings WHERE id = ?',
+      { replacements: [req.params.id], type: sequelize.QueryTypes.SELECT }
+    );
+    if (!bk) return res.status(404).json({ message: 'Booking not found.' });
+    // A client may only replace the receipt on their OWN booking.
+    if (bk.client_id !== req.user.id)
+      return res.status(403).json({ message: 'This is not your booking.' });
+    // Only while a receipt is refused, or still waiting and the client spots
+    // their own mistake first. Never once money has been recorded.
+    if (!['rejected', 'pending_verification'].includes(bk.payment_status))
+      return res.status(409).json({
+        message: 'A new receipt cannot be uploaded for this booking.',
+      });
+
+    const gcash_receipt = `/uploads/receipts/${req.file.filename}`;
+    const reference = String(req.body?.gcash_reference || '').trim().slice(0, 50) || null;
+
+    await sequelize.query(
+      `UPDATE bookings
+          SET gcash_receipt = ?,
+              gcash_reference = COALESCE(?, gcash_reference),
+              payment_status = 'pending_verification',
+              receipt_rejected_reason = NULL,
+              receipt_rejected_at = NULL
+        WHERE id = ?`,
+      { replacements: [gcash_receipt, reference, req.params.id] }
+    );
+
+    res.json({
+      message: 'New receipt uploaded. The admin will check it shortly.',
+      gcash_receipt,
+    });
+  } catch (e) {
+    console.error('reuploadReceipt error:', e.message);
+    if (!res.headersSent) res.status(500).json({ message: 'Failed to upload the receipt.' });
+  }
+};
+
 // ── PATCH /api/bookings/:id/reschedule (admin proposes reschedule) ────────────
 
 // Shared availability rule for a proposed date. Used both when the admin
@@ -598,7 +813,7 @@ const dateUnavailableReason = async (dateStr, excludeId) => {
       : 'That date is blocked. Unblock it first if you want to schedule on it.';
 
   const [[cnt]] = await sequelize.query(
-    "SELECT COUNT(*) AS c FROM bookings WHERE date = ? AND status IN ('pending','confirmed') AND id <> ?",
+    `SELECT COUNT(*) AS c FROM bookings WHERE date = ? AND ${HOLDS_SLOT} AND id <> ?`,
     { replacements: [dateStr, excludeId || 0] }
   );
   if (parseInt(cnt.c) >= 2)
@@ -729,7 +944,7 @@ exports.adminCreateBooking = async (req, res) => {
 
       // Re-check inside the lock: the picture may have changed since above.
       const [[dayCount]] = await sequelize.query(
-        "SELECT COUNT(*) AS cnt FROM bookings WHERE date = ? AND status IN ('pending','confirmed')",
+        `SELECT COUNT(*) AS cnt FROM bookings WHERE date = ? AND ${HOLDS_SLOT}`,
         { replacements: [bookDate], transaction: t }
       );
       if (parseInt(dayCount.cnt) >= 2) {

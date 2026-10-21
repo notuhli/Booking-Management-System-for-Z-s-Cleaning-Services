@@ -54,6 +54,14 @@ export const bookingsAPI = {
   getMy:        ()          => api.get('/bookings/my'),
   updateStatus: (id, status)=> api.patch(`/bookings/${id}/status`, { status }),
   verifyGcash:  (id)        => api.patch(`/bookings/${id}/verify-gcash`),
+  // Turning a receipt down. The reason is required — it is what the client is
+  // shown and emailed, so a rejection is never silent.
+  rejectGcash:  (id, reason)=> api.patch(`/bookings/${id}/reject-gcash`, { reason }),
+  // Ending a booking whose receipts keep failing. Only works on a rejected one.
+  cancelRejected: (id, reason) => api.patch(`/bookings/${id}/cancel-rejected`, { reason }),
+  // The client's replacement receipt after a rejection. FormData, so the
+  // browser sets the multipart boundary itself.
+  reuploadReceipt: (id, formData) => api.patch(`/bookings/${id}/receipt`, formData),
   setHouseSize: (id, data)  => api.patch(`/bookings/${id}/house-size`, data),
   reschedule:         (id, data)  => api.patch(`/bookings/${id}/reschedule`, data),
   respondReschedule:  (id, action) => api.patch(`/bookings/${id}/reschedule-response`, { action }),

@@ -72,8 +72,13 @@ async function syncPaymentStatus(bookingId) {
   if (sum.total <= 0 || sum.paid + EPSILON >= sum.total) next = 'paid';
   else if (sum.paid > 0)                                next = 'partial';
   // Nothing received yet: keep 'pending_verification' if a receipt is waiting,
-  // so checking the maths never wipes out that flag.
-  else next = sum.payment_status === 'pending_verification' ? 'pending_verification' : 'unpaid';
+  // and keep 'rejected' if the admin has turned one down, so recalculating the
+  // maths never wipes out either flag. A rejected receipt must stay visibly
+  // rejected until the client uploads a replacement — silently dropping it back
+  // to 'unpaid' would hide the fact that a payment was submitted and refused.
+  else next = ['pending_verification', 'rejected'].includes(sum.payment_status)
+    ? sum.payment_status
+    : 'unpaid';
 
   if (next !== sum.payment_status) {
     await sequelize.query('UPDATE bookings SET payment_status = ? WHERE id = ?',

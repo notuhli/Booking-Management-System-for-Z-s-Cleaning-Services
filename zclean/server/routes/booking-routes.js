@@ -23,6 +23,27 @@ r.get( '/',                  authenticate, requireRole('admin'), c.getAllBooking
 r.get( '/my',                authenticate, requireRole('client'), c.getMyBookings);
 r.patch('/:id/status',       authenticate, requireRole('admin'), c.updateBookingStatus);
 r.patch('/:id/verify-gcash', authenticate, requireRole('admin'), c.verifyGcash);
+// The other half of verifying: turning a receipt down, with a reason.
+r.patch('/:id/reject-gcash', authenticate, requireRole('admin'), c.rejectGcash);
+// Ending the loop when the receipts keep failing. Only applies to a booking
+// whose receipt was rejected — general cancellation stays removed.
+r.patch('/:id/cancel-rejected', authenticate, requireRole('admin'), c.cancelRejectedBooking);
+// The client's way back after a rejection — same upload pipeline (size limit,
+// magic-byte check, storage) that a new booking's receipt goes through.
+//
+// Rate limited separately from booking creation: without this, someone whose
+// receipt was refused could push image after image at the server, filling
+// storage and the admin's queue. Five an hour is far more than a real client
+// needs to send one corrected receipt.
+const reuploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: { message: 'Too many receipt uploads. Please wait a while, or message us in the app.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+r.patch('/:id/receipt',      authenticate, requireRole('client'), reuploadLimiter,
+        uploadReceipt.single('gcash_receipt'), uploadError, verifyImage, c.reuploadReceipt);
 r.patch('/:id/house-size',   authenticate, requireRole('admin'), c.setHouseSize);
 r.patch('/:id/reschedule',          authenticate, requireRole('admin'),  c.rescheduleBooking);
 r.patch('/:id/reschedule-response', authenticate, requireRole('client'), c.respondReschedule);
