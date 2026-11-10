@@ -87,6 +87,7 @@ export const reportsAPI = {
   profitLoss:   (p)      => api.get('/reports/profit-loss',   { params: p }),
   logs:         ()       => api.get('/reports/schedule-logs'),
   serviceStats: (p)      => api.get('/reports/service-stats', { params: p }),
+  serviceBookings: (p)   => api.get('/reports/service-bookings', { params: p }),
   publicStats:  ()       => api.get('/reports/public-stats'),
 };
 
