@@ -130,6 +130,7 @@ export default function AdminReports() {
   const [chartData,   setChartData]   = useState(null);   // yearly data for charts
   const [svcStats,    setSvcStats]    = useState([]);      // service popularity
   const [svcSort,     setSvcSort]     = useState({ key: 'total_bookings', dir: 'desc' });
+  const [svcExportService, setSvcExportService] = useState(''); // '' = all services
   // Sorted copy used by both the table and the CSV export, so they always match.
   const sortedSvc = [...svcStats].sort((a, b) => {
     const dir = svcSort.dir === 'asc' ? 1 : -1;
@@ -1008,22 +1009,38 @@ export default function AdminReports() {
               <div className="card p-5">
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                   <p className="font-bold" style={{ color: 'var(--text-primary)' }}>Service Summary</p>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-2 items-center">
+                  {/* Optional: download one service only. Blank = all services. */}
+                  <select value={svcExportService} onChange={e => setSvcExportService(e.target.value)}
+                    className="px-2 py-1.5 rounded-xl text-xs border"
+                    style={{ border: '1.5px solid var(--border)', color: 'var(--text-primary)', background: 'var(--surface, transparent)' }}
+                    aria-label="Service to export">
+                    <option value="">All services</option>
+                    {[...new Set(svcStats.map(s => s.service_name))].sort().map(name => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                  </select>
                   {/* One row per booking, for filtering by service in Excel */}
                   <button onClick={async () => {
                     try {
                       const { data } = await reportsAPI.serviceBookings({ year: chartYear });
-                      downloadCSV(
-                        data.map(b => ({
-                          'Booking #': b.id,
-                          'Service': b.service_name,
-                          'Date': b.date,
-                          'Client': b.client_name,
-                          'Status': b.status,
-                          'Payment': b.payment_status,
-                        })),
-                        `ZClean_ServiceBookings_${chartYear}.csv`
-                      );
+                      const rows = (svcExportService
+                        ? data.filter(b => b.service_name === svcExportService)
+                        : data
+                      ).map(b => ({
+                        'Booking #': b.id,
+                        'Service': b.service_name,
+                        'Date': b.date,
+                        'Client': b.client_name,
+                        'Status': b.status,
+                        'Payment': b.payment_status,
+                      }));
+                      if (rows.length === 0) {
+                        alert(`No bookings found${svcExportService ? ` for ${svcExportService}` : ''} in ${chartYear}.`);
+                        return;
+                      }
+                      const slug = svcExportService ? `_${svcExportService.replace(/[^A-Za-z0-9]+/g, '')}` : '';
+                      downloadCSV(rows, `ZClean_ServiceBookings${slug}_${chartYear}.csv`);
                     } catch (e) {
                       alert('Could not export the bookings. Please try again.');
                     }
