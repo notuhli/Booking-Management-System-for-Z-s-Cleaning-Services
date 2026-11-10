@@ -457,6 +457,29 @@ const getServiceStats = async (req, res) => {
 };
 
 
+// One row per booking for a year, so the CSV can be filtered by service in Excel
+// (e.g. show only "Deep Cleaning" or only "Standard Clean" bookings). Every status
+// is returned, so the status column can be filtered too.
+const getServiceBookings = async (req, res) => {
+  const year = parseInt(req.query.year);
+  try {
+    const where = year ? `WHERE EXTRACT(YEAR FROM b.date) = ${parseInt(year)}` : '';
+    const rows = await sequelize.query(`
+      SELECT b.id, b.date, s.name AS service_name, u.name AS client_name,
+             b.status, b.payment_status
+      FROM bookings b
+      JOIN services s ON s.id = b.service_id
+      JOIN users    u ON u.id = b.client_id
+      ${where}
+      ORDER BY s.name ASC, b.date ASC
+    `, { type: sequelize.QueryTypes.SELECT });
+    res.json(rows);
+  } catch (e) {
+    console.error('getServiceBookings error:', e.message);
+    res.status(500).json({ message: 'Failed to fetch service bookings.' });
+  }
+};
+
 const getPublicStats = async (req, res) => {
   try {
     const [[clients]] = await sequelize.query(
@@ -473,5 +496,5 @@ const getPublicStats = async (req, res) => {
 
 module.exports = {
   getDashboard, getMonthlyReport, getYearlyReport, getRangeReport, getProfitLoss,
-  getScheduleLogs, getServiceStats, getPublicStats,
+  getScheduleLogs, getServiceStats, getServiceBookings, getPublicStats,
 };

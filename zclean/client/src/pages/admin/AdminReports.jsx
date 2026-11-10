@@ -129,6 +129,18 @@ export default function AdminReports() {
   const [blocked,  setBlocked]  = useState([]);
   const [chartData,   setChartData]   = useState(null);   // yearly data for charts
   const [svcStats,    setSvcStats]    = useState([]);      // service popularity
+  const [svcSort,     setSvcSort]     = useState({ key: 'total_bookings', dir: 'desc' });
+  // Sorted copy used by both the table and the CSV export, so they always match.
+  const sortedSvc = [...svcStats].sort((a, b) => {
+    const dir = svcSort.dir === 'asc' ? 1 : -1;
+    if (svcSort.key === 'service_name') return dir * String(a.service_name).localeCompare(String(b.service_name));
+    return dir * ((parseInt(a[svcSort.key]) || 0) - (parseInt(b[svcSort.key]) || 0));
+  });
+  const toggleSvcSort = (key) => setSvcSort(prev =>
+    prev.key === key
+      ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: key === 'service_name' ? 'asc' : 'desc' }
+  );
   const [chartYear,   setChartYear]   = useState(new Date().getFullYear());
   const [chartsLoading, setChartsLoading] = useState(false);
   const [loading,  setLoading]  = useState(false);
@@ -994,7 +1006,48 @@ export default function AdminReports() {
 
               {/* Bookings table summary */}
               <div className="card p-5">
-                <p className="font-bold mb-4" style={{ color: 'var(--text-primary)' }}>Service Summary</p>
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                  <p className="font-bold" style={{ color: 'var(--text-primary)' }}>Service Summary</p>
+                  <div className="flex flex-wrap gap-2">
+                  {/* One row per booking, for filtering by service in Excel */}
+                  <button onClick={async () => {
+                    try {
+                      const { data } = await reportsAPI.serviceBookings({ year: chartYear });
+                      downloadCSV(
+                        data.map(b => ({
+                          'Booking #': b.id,
+                          'Service': b.service_name,
+                          'Date': b.date,
+                          'Client': b.client_name,
+                          'Status': b.status,
+                          'Payment': b.payment_status,
+                        })),
+                        `ZClean_ServiceBookings_${chartYear}.csv`
+                      );
+                    } catch (e) {
+                      alert('Could not export the bookings. Please try again.');
+                    }
+                  }} className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all hover:opacity-80"
+                    style={{ border: '1.5px solid var(--brand)', color: 'var(--brand)' }}>
+                    <Download size={12}/> Export Bookings
+                  </button>
+                  {/* Exports the rows in the order currently shown in the table */}
+                  <button onClick={() => downloadCSV(
+                    // Numbers written as numbers (not text) so spreadsheets sort them correctly;
+                    // Rank follows the current sort order.
+                    sortedSvc.map((s, i) => ({
+                      'Rank': i + 1,
+                      'Service': s.service_name,
+                      'Total Bookings': parseInt(s.total_bookings) || 0,
+                      'Completed': parseInt(s.completed) || 0,
+                    })),
+                    `ZClean_ServiceStats_${chartYear}.csv`
+                  )} className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all hover:opacity-80"
+                    style={{ border: '1.5px solid var(--brand)', color: 'var(--brand)' }}>
+                    <Download size={12}/> Export CSV
+                  </button>
+                  </div>
+                </div>
                 {svcStats.length === 0 ? (
                   <p className="text-sm" style={{ color: 'var(--text-muted)' }}>No data yet.</p>
                 ) : (
@@ -1002,14 +1055,29 @@ export default function AdminReports() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                        {['Service','Bookings','Completed'].map(h => (
-                          <th key={h} className="text-left py-2 text-xs font-bold uppercase"
-                            style={{ color: 'var(--text-muted)' }}>{h}</th>
-                        ))}
+                        {[
+                          { key: 'service_name',   label: 'Service' },
+                          { key: 'total_bookings', label: 'Bookings' },
+                          { key: 'completed',      label: 'Completed' },
+                        ].map(col => {
+                          const active = svcSort.key === col.key;
+                          return (
+                            <th key={col.key} className="text-left py-2 text-xs font-bold uppercase"
+                              style={{ color: active ? 'var(--brand)' : 'var(--text-muted)' }}
+                              aria-sort={active ? (svcSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                              <button type="button" onClick={() => toggleSvcSort(col.key)}
+                                className="inline-flex items-center gap-1 uppercase font-bold hover:opacity-80"
+                                style={{ color: 'inherit' }}>
+                                {col.label}
+                                <span aria-hidden="true">{active ? (svcSort.dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+                              </button>
+                            </th>
+                          );
+                        })}
                       </tr>
                     </thead>
                     <tbody>
-                      {svcStats.map((s, i) => (
+                      {sortedSvc.map((s, i) => (
                         <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
                           <td className="py-2.5 font-medium" style={{ color: 'var(--text-primary)' }}>{s.service_name}</td>
                           <td className="py-2.5 font-bold" style={{ color: 'var(--brand)' }}>{s.total_bookings}</td>
@@ -1020,18 +1088,6 @@ export default function AdminReports() {
                   </table>
                   </div>
                 )}
-                {/* Export chart data */}
-                <button onClick={() => downloadCSV(
-                  svcStats.map(s => ({
-                    'Service': s.service_name,
-                    'Total Bookings': s.total_bookings,
-                    'Completed': s.completed,
-                  })),
-                  `ZClean_ServiceStats_${chartYear}.csv`
-                )} className="flex items-center gap-2 mt-4 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all hover:border-[var(--brand)] hover:text-[var(--brand)]"
-                  style={{ border: '1.5px solid var(--border)', color: 'var(--text-muted)' }}>
-                  <Download size={12}/> Export CSV
-                </button>
               </div>
             </div>
 
